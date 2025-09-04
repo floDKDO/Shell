@@ -21,6 +21,8 @@
 #define MAX_NUMBER_PIPE 10
 #define MAX_NUMBER_PROCESS MAX_NUMBER_PIPE + 1
 #define MAX_NUMBER_COMMAND 10
+#define MAX_NUMBER_STRINGS 20
+#define MAX_LENGTH_STRING 256
 
 
 struct process
@@ -30,9 +32,11 @@ struct process
 	
 	bool here_document;
 	char* delimiter;
-	char* strings[256];
-	
+	char strings[MAX_NUMBER_STRINGS][MAX_LENGTH_STRING];
+	int nb_string;
 	bool here_string;
+	int pseudo_pipe[2]; //simuler le comportement de "<<" et "<<<" avec un pipe qui n'est pas écrit explicitement dans la commande
+	
 	bool redir_stdout;
 	bool append;
 	char* file_redir_stdout;
@@ -159,13 +163,32 @@ int main()
 			{
 				c.p[c.index_process].here_document = true;
 				c.p[c.index_process].delimiter = strtok(NULL, " \n"); //next token = delimiter
-				
-				//TODO : tant que dans stdin, il n'y a pas exactement le délimiteur, continuer à lire dans stdin du père et écrire dans strings
+
+				//tant que dans stdin, il n'y a pas exactement le délimiteur, continuer à lire dans stdin du père et écrire dans strings
+				int index = 0;
+				bool stop = false;
+				while(!stop)
+				{
+					printf("> ");
+					char string[MAX_LENGTH_STRING] = {0};
+					fgets(string, MAX_LENGTH_STRING, stdin);
+					string[strcspn(string, "\n")] = '\0';
+					
+					if(strcmp(string, c.p[c.index_process].delimiter) != 0)
+					{
+						snprintf(c.p[c.index_process].strings[index], MAX_LENGTH_STRING, "%s", string);
+						index += 1;
+					}
+					else stop = true;
+				}
+				c.p[c.index_process].nb_string = index;
+				CHK(pipe(c.p[c.index_process].pseudo_pipe));				
 			}
 			else if(strcmp(token, "<<<") == 0)
 			{
 				c.p[c.index_process].here_string = true;
 				c.p[c.index_process].file_redir_stdin = strtok(NULL, " \n"); //next token = string
+				CHK(pipe(c.p[c.index_process].pseudo_pipe));	
 			}
 			else if(strcmp(token, "&") == 0)
 			{
@@ -254,14 +277,11 @@ int main()
 						CHK(open(c.p[i].file_redir_stdin, O_RDONLY, 0666));
 					}
 					
-					if(c.p[i].here_document)
+					if(c.p[i].here_document || c.p[i].here_string) //le père va écrire le(s) string(s) dans le tube, ce contenu sera redirigé dans le stdin du fils
 					{
-						//CHK(write(STDIN_FILENO, c.p[i].file_redir_stdin, strlen(c.p[i].file_redir_stdin)));
-					}
-					
-					if(c.p[i].here_string)
-					{
-						CHK(write(STDIN_FILENO, c.p[i].file_redir_stdin, strlen(c.p[i].file_redir_stdin)));
+						CHK(close(c.p[i].pseudo_pipe[WRITE_END]));
+						CHK(dup2(c.p[i].pseudo_pipe[READ_END], STDIN_FILENO));
+						CHK(close(c.p[i].pseudo_pipe[READ_END]));
 					}
 					
 					if(c.p[i].redir_stdout)
@@ -314,6 +334,27 @@ int main()
 							CHK(close(c.pipes[i-1][READ_END]));
 							CHK(close(c.pipes[i-1][WRITE_END]));
 						}
+					}
+					
+					if(c.p[i].here_document || c.p[i].here_string) //le père écrit dans le tube dont le contenu sera redirigé dans le stdin du fils
+					{
+						CHK(close(c.p[i].pseudo_pipe[READ_END]));
+						
+						if(c.p[i].here_document)
+						{
+							for(int j = 0; j < c.p[i].nb_string; j++)
+							{
+								CHK(write(c.p[i].pseudo_pipe[WRITE_END], c.p[i].strings[j], strlen(c.p[i].strings[j])));
+								CHK(write(c.p[i].pseudo_pipe[WRITE_END], "\n", 2)); //écrire un "\n" à la fin de chaque string
+							}
+						}
+						else if(c.p[i].here_string)
+						{
+							CHK(write(c.p[i].pseudo_pipe[WRITE_END], c.p[i].file_redir_stdin, strlen(c.p[i].file_redir_stdin)));
+							CHK(write(c.p[i].pseudo_pipe[WRITE_END], "\n", 2)); //écrire un "\n" à la fin de chaque string
+						}
+						
+						CHK(close(c.p[i].pseudo_pipe[WRITE_END]));
 					}
 					
 					if(c.p[i].is_cd)
